@@ -1,3 +1,10 @@
 <resources>
     <string name="app_name">zadanie4</string>
+
+    <string name="clear">Wyczyść</string>
+
+    <string name="color_red">Czerwony</string>
+    <string name="color_yellow">Żółty</string>
+    <string name="color_blue">Niebieski</string>
+    <string name="color_green">Zielony</string>
 </resources>

@@ -9,52 +9,37 @@ import android.graphics.Path
 import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.TextureView
+import com.fhodun.zadanie4.drawing.DrawingEngine
 import kotlin.math.max
 
-/**
- * Wariant oparty o TextureView.
- * Na emulatorach bywa pewniejszy niż SurfaceView (zwłaszcza w kwestii inputu i warstw).
- * Architektura taka sama: osobny wątek renderujący + bitmapa jako trwały bufor.
- */
 class DrawingTextureView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
-) : TextureView(context, attrs), TextureView.SurfaceTextureListener, Runnable {
+) : TextureView(context, attrs), TextureView.SurfaceTextureListener {
 
     private val lock = Any()
-
-    @Volatile
-    private var running = false
-
-    @Volatile
-    private var textureAvailable = false
-
-    private var renderThread: Thread? = null
 
     private var bufferBitmap: Bitmap? = null
     private var bufferCanvas: Canvas? = null
 
-    private val currentPath = Path()
-
-    private var currentColorInt: Int = Color.RED
+    private val engine = DrawingEngine(initialColor = Color.RED)
 
     private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
-        color = currentColorInt
         strokeWidth = dpToPx(8f)
+        color = engine.currentColor
     }
 
     private val markerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
-        color = currentColorInt
+        color = engine.currentColor
     }
 
     private val markerRadiusPx: Float = dpToPx(6f)
 
-    private var startX = 0f
-    private var startY = 0f
+    private val previewPath = Path()
 
     init {
         surfaceTextureListener = this
@@ -66,118 +51,46 @@ class DrawingTextureView @JvmOverloads constructor(
 
     fun setColor(color: Int) {
         synchronized(lock) {
-            currentColorInt = color
+            engine.setColor(color)
             linePaint.color = color
             markerPaint.color = color
         }
+        redraw()
     }
 
     fun clear() {
         synchronized(lock) {
-            currentPath.reset()
+            engine.clear()
             bufferCanvas?.drawColor(Color.WHITE)
         }
+        redraw()
     }
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
-        stopThread()
         synchronized(lock) {
             bufferBitmap?.recycle()
             bufferBitmap = null
             bufferCanvas = null
-            currentPath.reset()
+            engine.clear()
         }
     }
 
     override fun onSurfaceTextureAvailable(surface: android.graphics.SurfaceTexture, width: Int, height: Int) {
-        textureAvailable = true
         ensureBuffer(width, height)
-        startThreadIfNeeded()
+        redraw()
     }
 
     override fun onSurfaceTextureSizeChanged(surface: android.graphics.SurfaceTexture, width: Int, height: Int) {
         ensureBuffer(width, height)
+        redraw()
     }
 
     override fun onSurfaceTextureDestroyed(surface: android.graphics.SurfaceTexture): Boolean {
-        textureAvailable = false
-        stopThread()
         return true
     }
 
     override fun onSurfaceTextureUpdated(surface: android.graphics.SurfaceTexture) {
-        // no-op
-    }
-
-    private fun startThreadIfNeeded() {
-        if (running) return
-        if (!textureAvailable) return
-
-        running = true
-        renderThread = Thread(this, "DrawingTextureView-Render").also { it.start() }
-    }
-
-    private fun stopThread() {
-        running = false
-        renderThread?.interrupt()
-        try {
-            renderThread?.join(1000)
-        } catch (_: InterruptedException) {
-        }
-        renderThread = null
-    }
-
-    override fun run() {
-        while (running) {
-            if (!textureAvailable || !isAvailable) {
-                sleepQuietly(16)
-                continue
-            }
-
-            val c: Canvas? = try {
-                lockCanvas()
-            } catch (_: Exception) {
-                null
-            }
-
-            if (c == null) {
-                sleepQuietly(16)
-                continue
-            }
-
-            try {
-                drawFrame(c)
-            } catch (_: Exception) {
-                // Jeśli texture w trakcie renderu zniknie, nie wywracamy aplikacji.
-            } finally {
-                try {
-                    unlockCanvasAndPost(c)
-                } catch (_: Exception) {
-                }
-            }
-
-            sleepQuietly(16)
-        }
-    }
-
-    private fun drawFrame(canvas: Canvas) {
-        val bmp: Bitmap?
-        val pathCopy = Path()
-        val paintCopy: Paint
-
-        synchronized(lock) {
-            if (bufferBitmap == null && width > 0 && height > 0) {
-                ensureBuffer(width, height)
-            }
-            bmp = bufferBitmap
-            pathCopy.set(currentPath)
-            paintCopy = Paint(linePaint)
-        }
-
-        canvas.drawColor(Color.WHITE)
-        if (bmp != null) canvas.drawBitmap(bmp, 0f, 0f, null)
-        if (!pathCopy.isEmpty) canvas.drawPath(pathCopy, paintCopy)
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -190,41 +103,40 @@ class DrawingTextureView @JvmOverloads constructor(
                     if (bufferBitmap == null && width > 0 && height > 0) {
                         ensureBuffer(width, height)
                     }
-                    currentPath.reset()
-                    startX = event.x
-                    startY = event.y
-                    currentPath.moveTo(startX, startY)
+                    engine.onDown(event.x, event.y)
                 }
+                redraw()
                 return true
             }
 
             MotionEvent.ACTION_MOVE -> {
                 synchronized(lock) {
-                    currentPath.lineTo(event.x, event.y)
+                    engine.onMove(event.x, event.y)
                 }
+                redraw()
                 return true
             }
 
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                val endX = event.x
-                val endY = event.y
+                val commit = synchronized(lock) { engine.onUpOrCancel(event.x, event.y) }
 
-                synchronized(lock) {
-                    currentPath.lineTo(endX, endY)
-                    bufferCanvas?.let { bc ->
-                        bc.drawPath(currentPath, linePaint)
-                        bc.drawCircle(startX, startY, markerRadiusPx, markerPaint)
-                        bc.drawCircle(endX, endY, markerRadiusPx, markerPaint)
+                if (commit != null) {
+                    synchronized(lock) {
+                        bufferCanvas?.let { bc ->
+                            bc.drawPath(commit.path, linePaint)
+                            bc.drawCircle(commit.startX, commit.startY, markerRadiusPx, markerPaint)
+                            bc.drawCircle(commit.endX, commit.endY, markerRadiusPx, markerPaint)
+                        }
                     }
-                    currentPath.reset()
                 }
 
                 performClick()
+                redraw()
                 return true
             }
         }
 
-        return true
+        return super.onTouchEvent(event)
     }
 
     override fun performClick(): Boolean {
@@ -232,9 +144,46 @@ class DrawingTextureView @JvmOverloads constructor(
         return true
     }
 
+    private fun redraw() {
+        if (!isAvailable) return
+
+        val canvas = try {
+            lockCanvas()
+        } catch (_: Exception) {
+            null
+        } ?: return
+
+        try {
+            drawFrame(canvas)
+        } finally {
+            try {
+                unlockCanvasAndPost(canvas)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun drawFrame(canvas: Canvas) {
+        val bmp: Bitmap?
+
+        synchronized(lock) {
+            if (bufferBitmap == null && width > 0 && height > 0) {
+                ensureBuffer(width, height)
+            }
+
+            bmp = bufferBitmap
+            previewPath.set(engine.currentPath)
+        }
+
+        canvas.drawColor(Color.WHITE)
+        if (bmp != null) canvas.drawBitmap(bmp, 0f, 0f, null)
+        if (!previewPath.isEmpty) canvas.drawPath(previewPath, linePaint)
+    }
+
     private fun ensureBuffer(w: Int, h: Int) {
         val safeW = max(1, w)
         val safeH = max(1, h)
+
         synchronized(lock) {
             val existing = bufferBitmap
             if (existing != null && existing.width == safeW && existing.height == safeH) return
@@ -246,11 +195,4 @@ class DrawingTextureView @JvmOverloads constructor(
     }
 
     private fun dpToPx(dp: Float): Float = dp * resources.displayMetrics.density
-
-    private fun sleepQuietly(ms: Long) {
-        try {
-            Thread.sleep(ms)
-        } catch (_: InterruptedException) {
-        }
-    }
 }
