@@ -76,12 +76,20 @@ class DrawingTextureView @JvmOverloads constructor(
         }
     }
 
-    override fun onSurfaceTextureAvailable(surface: android.graphics.SurfaceTexture, width: Int, height: Int) {
+    override fun onSurfaceTextureAvailable(
+        surface: android.graphics.SurfaceTexture,
+        width: Int,
+        height: Int
+    ) {
         ensureBuffer(width, height)
         redraw()
     }
 
-    override fun onSurfaceTextureSizeChanged(surface: android.graphics.SurfaceTexture, width: Int, height: Int) {
+    override fun onSurfaceTextureSizeChanged(
+        surface: android.graphics.SurfaceTexture,
+        width: Int,
+        height: Int
+    ) {
         ensureBuffer(width, height)
         redraw()
     }
